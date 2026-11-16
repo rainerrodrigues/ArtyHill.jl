@@ -8,6 +8,17 @@ using VeriJul
 
 # Double integrator, dt = 1 ms, position + velocity measured.
 const DT = 1e-3
+
+# On Julia 1.10, `ccall((:sym, lib))` to a library that is absent at compile time
+# goes through a lazily resolved function pointer, which AllocCheck reports as
+# dynamic dispatch. C code cannot allocate on the Julia heap, so on 1.10 accept
+# exactly those SOEM call sites — anything else still fails. 1.11+ emits a
+# direct PLT trampoline and must report nothing.
+const SOEM_FFI_SHIMS = (:_ec_send, :_ec_receive)
+is_soem_ffi_site(site) = site isa AllocCheck.DynamicDispatch && !isempty(site.backtrace) &&
+                         first(site.backtrace).func in SOEM_FFI_SHIMS
+alloc_free_except_soem_ffi(sites) =
+    VERSION < v"1.11" ? all(is_soem_ffi_site, sites) : isempty(sites)
 make_plant() = DiscreteLinearPlant([1.0 DT; 0.0 1.0], reshape([0.5DT^2, DT], 2, 1),
                                    [1.0 0.0; 0.0 1.0], [1.0, 0.0])
 make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
@@ -75,9 +86,9 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
         ws6 = ControlWorkspace{6,2,6}()
         cia = EtherCATBackend("eth0"; output_bytes=16,
                               codec=ArtyHill.CiA402Codec{2}(CiA402Layout(out_stride=8, in_stride=10)))
-        @test isempty(check_step_allocs(ws6, (u, x, y) -> nothing, cia))
+        @test alloc_free_except_soem_ffi(check_step_allocs(ws6, (u, x, y) -> nothing, cia))
         ecat = EtherCATBackend("eth0"; output_bytes=8)
-        @test isempty(check_step_allocs(ws, ctrl, ecat))
+        @test alloc_free_except_soem_ffi(check_step_allocs(ws, ctrl, ecat))
     end
 
     @testset "uninitialized hardware backends report errors" begin
