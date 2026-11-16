@@ -70,19 +70,21 @@ end
     TelemetrySample{P,M}
 
 One logged control cycle: wake-up timestamp (`CLOCK_MONOTONIC` ns), wake-up
-lateness and compute latency (ns), step status, measurements and commands.
+lateness and compute latency (ns), step status, whether the step overran its
+deadline, measurements and commands.
 """
 struct TelemetrySample{P,M}
     t_ns::Int64
     wake_late_ns::Int64
     latency_ns::Int64
     status::Int32
+    overrun::Bool
     y::SVector{P,Float64}
     u::SVector{M,Float64}
 end
 
-TelemetrySample(ws::ControlWorkspace{N,M,P}, t, late, lat, st) where {N,M,P} =
-    TelemetrySample{P,M}(t, late, lat, st, SVector{P,Float64}(ws.y_meas), SVector{M,Float64}(ws.u_cmd))
+TelemetrySample(ws::ControlWorkspace{N,M,P}, t, late, lat, st, ovr::Bool=false) where {N,M,P} =
+    TelemetrySample{P,M}(t, late, lat, st, ovr, SVector{P,Float64}(ws.y_meas), SVector{M,Float64}(ws.u_cmd))
 
 "Element type of the telemetry ring matching workspace `ws`."
 telemetry_type(::ControlWorkspace{N,M,P}) where {N,M,P} = TelemetrySample{P,M}
@@ -101,12 +103,12 @@ Dump collected `TelemetrySample`s as CSV (header + one row per cycle) for
 post-processing / system identification outside the real-time process.
 """
 function write_telemetry_csv(io::IO, samples::AbstractVector{TelemetrySample{P,M}}) where {P,M}
-    print(io, "t_ns,wake_late_ns,latency_ns,status")
+    print(io, "t_ns,wake_late_ns,latency_ns,status,overrun")
     for i in 1:P; print(io, ",y", i); end
     for i in 1:M; print(io, ",u", i); end
     println(io)
     for s in samples
-        print(io, s.t_ns, ',', s.wake_late_ns, ',', s.latency_ns, ',', s.status)
+        print(io, s.t_ns, ',', s.wake_late_ns, ',', s.latency_ns, ',', s.status, ',', Int(s.overrun))
         for v in s.y; print(io, ',', v); end
         for v in s.u; print(io, ',', v); end
         println(io)

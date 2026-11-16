@@ -26,6 +26,16 @@ write_actuators!(u, b::AbstractHILBackend) =
     throw(ArgumentError("write_actuators! is not implemented for $(typeof(b))"))
 
 """
+    heartbeat!(backend, iteration) -> Int32
+
+Called by [`run_realtime_loop!`](@ref) once per cycle after `control_step!`.
+Backends override it to emit a liveness signal for the drive's own watchdog
+(e.g. a CANopen heartbeat frame). Default: no-op returning `HIL_OK`.
+Must be allocation-free.
+"""
+@inline heartbeat!(::AbstractHILBackend, ::Integer) = HIL_OK
+
+"""
     fixed_cstring(s, Val(N)) -> NTuple{N,UInt8}
 
 Pack `s` into a NUL-terminated fixed-size buffer (for interface names etc.).

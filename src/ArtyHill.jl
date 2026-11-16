@@ -18,12 +18,13 @@ module ArtyHill
 
 using StaticArrays
 using Libdl
+using Preferences
 
 export AbstractHILBackend, SimulationBackend, SocketCANBackend, EtherCATBackend
-export init_backend!, read_sensors!, write_actuators!, close_backend!
+export init_backend!, read_sensors!, write_actuators!, close_backend!, heartbeat!
 export AbstractPlant, DiscreteLinearPlant, plant_output!, plant_step!, reset_plant!
-export ControlWorkspace, control_step!, StaticFeedback
-export RTConfig, LoopStats, run_realtime_loop!, monotonic_ns
+export ControlWorkspace, control_step!, StaticFeedback, LimitedController
+export RTConfig, LoopStats, run_realtime_loop!, monotonic_ns, latency_percentile, send_safe_command!
 export SPSCRing, try_push!, try_pop!, drain!, TelemetrySample
 export check_step_allocs, compile_controller
 export HIL_OK, HIL_ERR_IO, HIL_ERR_NOT_INIT, HIL_ERR_SYS
@@ -33,6 +34,7 @@ include("backends/interface.jl")
 include("backends/simulation.jl")
 include("backends/socketcan.jl")
 include("backends/ethercat.jl")
+include("backends/cia402.jl")
 include("workspace.jl")
 include("telemetry.jl")
 include("realtime.jl")

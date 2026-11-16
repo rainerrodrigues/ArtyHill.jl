@@ -5,29 +5,45 @@ version = "0.1.0"
 
 [deps]
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Preferences = "21216c6a-2e73-6563-6e65-726566657250"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [weakdeps]
 AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+DiscretePIDs = "c1363496-6848-4723-8758-079b737f6baf"
+JuliaC = "acedd4c2-ced6-4a15-accc-2607eb759ba2"
+KaosCleaner = "33cd8d56-0019-45b6-a585-d49e6d89a734"
 StaticCompiler = "81625895-6c0f-48fc-b932-11a18313743c"
 StaticTools = "86c06d3c-3f03-46de-9781-57580aa96d0a"
+VeriJul = "a90675a2-a9ae-420a-b66a-bece10430f60"
 
 [extensions]
 ArtyHillAllocCheckExt = "AllocCheck"
+ArtyHillDiscretePIDsExt = "DiscretePIDs"
+ArtyHillJuliaCExt = "JuliaC"
+ArtyHillKaosCleanerExt = "KaosCleaner"
 ArtyHillStaticCompilerExt = ["StaticCompiler", "StaticTools"]
+ArtyHillVeriJulExt = "VeriJul"
 
 [compat]
 AllocCheck = "0.2.8"
+DiscretePIDs = "1"
 Libdl = "1"
+Preferences = "1.4"
 StaticArrays = "1.9"
 StaticCompiler = "0.7.6"
 StaticTools = "0.9.2"
+JuliaC = "0.3"
+KaosCleaner = "0.7"
+VeriJul = "0.1, 0.2"
 julia = "1.10"
 
 [extras]
 AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+DiscretePIDs = "c1363496-6848-4723-8758-079b737f6baf"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+VeriJul = "a90675a2-a9ae-420a-b66a-bece10430f60"
 
 [targets]
-test = ["Test", "AllocCheck", "Libdl"]
+test = ["Test", "AllocCheck", "DiscretePIDs", "Libdl", "VeriJul"]

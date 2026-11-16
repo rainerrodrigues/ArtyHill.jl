@@ -1,77 +1,95 @@
 # ArtyHill.jl
 
-Hardware-in-the-Loop (HIL) and real-time embedded prototyping in Julia: one
-controller, unchanged, from pure simulation → SocketCAN / EtherCAT hardware →
-a standalone `libjulia`-free shared library.
+[![CI](https://github.com/rainerrodrigues/ArtyHill.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/rainerrodrigues/ArtyHill.jl/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Hardware-in-the-Loop (HIL) and real-time embedded prototyping in Julia. One controller, unchanged,
+runs against a pure simulation, SocketCAN / EtherCAT hardware, or Verilog/RTL in a Verilator
+co-simulation, and finally ships as a C-callable library.
 
 | Layer | What's in it |
 | --- | --- |
-| **1. Hardware abstraction** | `AbstractHILBackend` · `SimulationBackend` (`DiscreteLinearPlant`, `NonlinearPlant`) · `SocketCANBackend` (raw libc sockets) · `EtherCATBackend` (SOEM 1.4) |
-| **2. Deterministic runtime** | `ControlWorkspace` (`MVector` buffers) · `control_step!` · `run_realtime_loop!` (`mlockall`, CPU pinning, `SCHED_FIFO`, GC pause, `clock_nanosleep(TIMER_ABSTIME)`) · `SPSCRing` lock-free telemetry |
-| **3. Verification & codegen** | `check_step_allocs` / `check_loop_allocs` (AllocCheck extension) · `compile_controller` (StaticCompiler extension) · `write_telemetry_csv` |
+| **Hardware abstraction** | `SimulationBackend` (`DiscreteLinearPlant`, `NonlinearPlant`) · `SocketCANBackend` (classic + CAN FD, kernel filters, heartbeat) · `EtherCATBackend` (SOEM 1.4) with `CiA402Codec` · `verijul_backend` (RTL co-simulation) |
+| **Deterministic runtime** | `ControlWorkspace` · `control_step!` · `run_realtime_loop!` (`mlockall`, CPU pinning, `SCHED_FIFO`, GC pause, `clock_nanosleep(TIMER_ABSTIME)`, latency histograms) · `SPSCRing` lock-free telemetry |
+| **Safety** | `LimitedController` (clamp, rate limit, NaN guard) · watchdog on consecutive overruns/errors · `safe_command` on every exit · `heartbeat!` hook |
+| **Verification & codegen** | `check_step_allocs` / `check_loop_allocs` (AllocCheck) · `compile_controller` (StaticCompiler, libc-only `.so`) · `juliac_build` (Julia 1.12 `juliac`) · `clean_telemetry` (KaosCleaner) |
 
 ## Quick start
 
 ```julia
 using ArtyHill, AllocCheck
 
-plant   = DiscreteLinearPlant([1 1e-3; 0 1], reshape([5e-7, 1e-3], 2, 1), [1.0 0; 0 1], [1.0, 0])
-backend = SimulationBackend(plant)           # later: SocketCANBackend("can0"; tx_base_id=0x100, rx_base_id=0x200)
-ws      = ControlWorkspace{2,1,2}()          # N states, M commands, P measurements
-ctrl    = StaticFeedback([40.0 12.0])        # any callable ctrl(u, x_hat, y) works
+const DT = 1e-3
+plant   = DiscreteLinearPlant([1 DT; 0 1], reshape([DT^2/2, DT], 2, 1), [1.0 0; 0 1], [1.0, 0])
+backend = SimulationBackend(plant)    # later: SocketCANBackend("can0"; tx_base_id=0x100, rx_base_id=0x200)
+ws      = ControlWorkspace{2,1,2}()   # N states, M commands, P measurements
+ctrl    = LimitedController(StaticFeedback([40.0 12.0]), -5.0, 5.0; max_rate=1e3, dt=DT)
 
-@assert isempty(check_step_allocs(ws, ctrl, backend))   # static proof: zero heap allocations
+@assert isempty(check_loop_allocs(ws, ctrl, backend))   # static proof: zero heap allocations
 
 ring = SPSCRing(ws, 1 << 14)
 init_backend!(backend)
-stats = run_realtime_loop!(ws, ctrl, backend, 1_000_000, 10_000; telemetry=ring, priority=80, cpu=3)
+stats = run_realtime_loop!(ws, ctrl, backend, 1_000_000, 10_000;
+                           telemetry=ring, priority=80, cpu=3,
+                           max_consecutive_overruns=5, safe_command=[0.0])
 close_backend!(backend)
+latency_percentile(stats, 0.999; kind=:wake)            # jitter, ns
 ```
 
-See [examples/sim_hil.jl](examples/sim_hil.jl) (1 kHz run plus a background telemetry consumer) and
-[examples/codegen_controller.jl](examples/codegen_controller.jl) (compiles a PD law to
-`pd_controller.so`, which depends only on libc).
+Examples: [sim_hil.jl](examples/sim_hil.jl) (1 kHz run with a telemetry consumer),
+[codegen_controller.jl](examples/codegen_controller.jl) (StaticCompiler → `pd_controller.so`, libc only),
+[juliac_controller.jl](examples/juliac_controller.jl) (juliac → C library wrapping a `LimitedController`).
 
-## Writing a backend
+## Optional extensions
 
-```julia
-struct MyBackend <: AbstractHILBackend ... end
-ArtyHill.init_backend!(b::MyBackend)::Int32
-ArtyHill.read_sensors!(y, b::MyBackend)::Int32      # fill y in place, no allocations
-ArtyHill.write_actuators!(u, b::MyBackend)::Int32   # no allocations
-ArtyHill.close_backend!(b::MyBackend)::Int32
+| Load | You get |
+| --- | --- |
+| `using AllocCheck` | `check_step_allocs`, `check_loop_allocs` |
+| `using StaticCompiler, StaticTools` | `compile_controller` |
+| `using JuliaC` (Julia ≥ 1.12) | `juliac_build` |
+| `using DiscretePIDs` | `pid_bank`: DiscretePIDs.jl controllers as one allocation-free controller |
+| `using VeriJul` | `verijul_backend`: a Verilated design as the plant / I/O hardware |
+| `using KaosCleaner` (Julia ≥ 1.12, [install from GitHub](https://github.com/rainerrodrigues/KaosCleaner)) | `clean_telemetry`: Hampel outlier removal and resampling of telemetry logs |
+
+## Testing
+
+```bash
+julia --threads=2 --project -e 'using Pkg; Pkg.test()'
 ```
 
-Return `HIL_OK` (0) or a negative `HIL_ERR_*` code. Exceptions allocate, so keep them out of the hot path.
-For real drive protocols, plug in your own payload codec (`encode_can`/`decode_can`, or
-`encode_outputs!`/`decode_inputs!` for EtherCAT process images) instead of the default packed `Float64`.
+Real SocketCAN I/O on a virtual bus (CAN FD needs mtu 72):
+
+```bash
+sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 mtu 72 up
+ARTYHILL_VCAN=vcan0 julia --threads=2 --project -e 'using Pkg; Pkg.test()'
+```
+
+Latency against `cyclictest`, on a PREEMPT_RT machine:
+
+```bash
+sudo ./bench/compare_cyclictest.sh 1000 100000 3 80
+```
 
 ## Real-time setup checklist
 
 - PREEMPT_RT kernel; isolate a core (`isolcpus=3 nohz_full=3 rcu_nocbs=3`) and pass `cpu=3`.
-- Privileges: root, or `CAP_SYS_NICE` + `CAP_IPC_LOCK` with `ulimit -r 99` and `ulimit -l unlimited`.
+- Root, or `CAP_SYS_NICE` + `CAP_IPC_LOCK` with `ulimit -r 99` and `ulimit -l unlimited`.
   Julia reserves a lot of virtual memory, so `mlockall` fails with `ENOMEM` under the default memlock limit.
-- `RTConfig(strict=true)` turns any failed setup step into an error instead of a warning (soft mode).
-- Run the loop on its own Julia thread (`--threads=2`) and keep other threads allocation-light: the GC is paused for the whole process.
-- Warm up (call `control_step!` a few times) before starting the loop, so compilation never lands on a deadline.
-- SocketCAN: `ip link set can0 up type can bitrate 1000000`, or a `vcan0` for testing.
-- EtherCAT: build SOEM 1.4 as `libsoem.so` on the loader path; raw sockets need `CAP_NET_RAW`.
-
-## Where this differs from the original design sketch
-
-- Interface fallbacks **throw at setup** instead of silently returning `nothing`.
-- `@check_allocs` is not wrapped around `control_step!` (that would check only on call, and only for the
-  types it sees then). `check_step_allocs` / `check_loop_allocs` prove the *exact* concrete instantiation,
-  including the full loop with timing and telemetry.
-- The hot loop reads the clock with `clock_gettime` and makes **static** SOEM `ccall`s. `time_ns()` (the
-  `jl_hrtime` runtime call) and calls through C function pointers are flagged by AllocCheck, so the loop
-  avoids them.
-- CAN and timespec buffers are preallocated `RefValue`s instead of fresh `Ref`s per cycle.
-- `SCHED_FIFO`, CPU affinity, `mlockall` and the GC state are all **restored** on exit, including on error.
-- Bumper.jl is not used: every hot-path buffer is static (`SVector`/`MVector`/preallocated `Vector`).
+- `strict=true` turns a failed setup step into an error instead of a warning (soft mode).
+- Run the loop on its own thread (`--threads=2`) and keep other threads allocation-light: the GC is paused process-wide.
+- Warm up (call `control_step!` a few times) before starting the loop.
+- EtherCAT: SOEM 1.4 as a shared library. Point ArtyHill at it with `set_libsoem!(path)` and restart Julia.
+  Raw sockets need `CAP_NET_RAW`.
 
 ## Status
 
-The 5,044 tests pass on Julia 1.11 (simulation, allocation proofs, SPSC concurrency, soft-RT loop timing).
-`SocketCANBackend` and `EtherCATBackend` are allocation-checked but **not yet exercised on real hardware**.
-Use `vcan0` and a bench EtherCAT slave before connecting anything that moves.
+- Tests pass on Julia 1.11 and 1.12 (CI also covers 1.10).
+- The VeriJul backend is exercised against a gcc-compiled stand-in for a Verilated model. It has not been run
+  against Verilator output yet.
+- **Not yet run on physical hardware:** `SocketCANBackend` (the vcan tests exist but haven't been run),
+  `EtherCATBackend` and `CiA402Codec` (unit-tested on synthetic process images only).
+  Use `vcan0` and a bench drive with hardware interlocks before connecting anything that moves.
+- `KaosCleaner` is not in the General registry, so registering ArtyHill there requires dropping that weak
+  dependency (or registering KaosCleaner first).
+
+See the [documentation](docs/src/index.md) for guides on backends, the real-time loop, safety and code generation.

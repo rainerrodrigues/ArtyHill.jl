@@ -38,8 +38,9 @@ const CpuSet = NTuple{16,UInt64}   # glibc cpu_set_t: 1024 bits
 end
 
 """
-    RTConfig(; period_ns, iterations, priority=80, cpu=-1,
-               lock_memory=true, disable_gc=true, strict=false)
+    RTConfig(; period_ns, iterations, priority=80, cpu=-1, lock_memory=true,
+               disable_gc=true, strict=false, max_consecutive_overruns=0,
+               max_consecutive_errors=3, hist_bucket_ns=1_000, hist_buckets=2_000)
 
 Real-time loop settings.
 
@@ -48,6 +49,11 @@ Real-time loop settings.
 - `lock_memory`: `mlockall(MCL_CURRENT | MCL_FUTURE)` to prevent page faults.
 - `disable_gc`: run `GC.gc()` once, then pause the GC for the duration of the loop.
 - `strict`: throw if any of the above cannot be applied instead of continuing in degraded (soft) mode.
+- `max_consecutive_overruns` / `max_consecutive_errors`: watchdog. The loop stops
+  (and drives the safe command, if one was given) after this many overruns / non-OK
+  steps in a row. `0` disables the check.
+- `hist_bucket_ns`, `hist_buckets`: resolution and range of the latency / jitter
+  histograms used by [`latency_percentile`](@ref). The last bucket collects everything above the range.
 
 `SCHED_FIFO` and `mlockall` need root or `CAP_SYS_NICE` / `CAP_IPC_LOCK` plus a
 suitable `ulimit -r` / `ulimit -l`.
@@ -60,6 +66,10 @@ Base.@kwdef struct RTConfig
     lock_memory::Bool = true
     disable_gc::Bool = true
     strict::Bool = false
+    max_consecutive_overruns::Int = 0
+    max_consecutive_errors::Int = 3
+    hist_bucket_ns::Int64 = 1_000
+    hist_buckets::Int = 2_000
 end
 
 """
@@ -68,30 +78,78 @@ end
 Timing statistics filled by [`run_realtime_loop!`](@ref). `wake_late` is the
 scheduling jitter (actual wake-up minus deadline), `latency` the compute time of
 `control_step!`, and an overrun is a step that finished after the next deadline.
+`abort_reason` is `:none` for a complete run, or `:overruns`, `:errors` or
+`:exception` when the loop stopped early. Use [`latency_percentile`](@ref) for
+percentiles from the preallocated histograms.
 """
-Base.@kwdef mutable struct LoopStats
-    iterations::Int64 = 0
-    overruns::Int64 = 0
-    errors::Int64 = 0
-    max_wake_late_ns::Int64 = 0
-    sum_wake_late_ns::Int64 = 0
-    max_latency_ns::Int64 = 0
-    sum_latency_ns::Int64 = 0
-    memory_locked::Bool = false
-    fifo_scheduled::Bool = false
-    cpu_pinned::Bool = false
-    gc_disabled::Bool = false
+mutable struct LoopStats
+    iterations::Int64
+    overruns::Int64
+    errors::Int64
+    max_wake_late_ns::Int64
+    sum_wake_late_ns::Int64
+    max_latency_ns::Int64
+    sum_latency_ns::Int64
+    consecutive_overruns::Int64
+    consecutive_errors::Int64
+    abort_reason::Symbol
+    safe_command_sent::Bool
+    memory_locked::Bool
+    fifo_scheduled::Bool
+    cpu_pinned::Bool
+    gc_disabled::Bool
+    const hist_bucket_ns::Int64
+    const latency_hist::Vector{Int64}
+    const wake_hist::Vector{Int64}
+end
+
+LoopStats(; hist_bucket_ns::Integer=1_000, hist_buckets::Integer=2_000) =
+    LoopStats(0, 0, 0, 0, 0, 0, 0, 0, 0, :none, false, false, false, false, false,
+              Int64(hist_bucket_ns), zeros(Int64, hist_buckets), zeros(Int64, hist_buckets))
+LoopStats(cfg::RTConfig) = LoopStats(; cfg.hist_bucket_ns, cfg.hist_buckets)
+
+@inline function _hist_add!(h::Vector{Int64}, bucket_ns::Int64, v::Int64)
+    i = clamp(div(max(v, 0), bucket_ns) + 1, 1, length(h))
+    @inbounds h[i] += 1
+    return nothing
+end
+
+"""
+    latency_percentile(stats, p; kind=:latency) -> Int64
+
+Upper bound (ns) of the histogram bucket holding the `p`-quantile (`0 < p ≤ 1`)
+of step latency (`kind=:latency`) or wake-up jitter (`kind=:wake`). Returns
+`typemax(Int64)` if the quantile falls in the overflow bucket.
+"""
+function latency_percentile(s::LoopStats, p::Real; kind::Symbol=:latency)
+    0 < p <= 1 || throw(ArgumentError("p must be in (0, 1]"))
+    h = kind === :latency ? s.latency_hist : kind === :wake ? s.wake_hist :
+        throw(ArgumentError("kind must be :latency or :wake"))
+    total = sum(h)
+    total == 0 && return Int64(0)
+    target = ceil(Int64, p * total)
+    acc = 0
+    for (i, c) in enumerate(h)
+        acc += c
+        if acc >= target
+            return i == length(h) ? typemax(Int64) : Int64(i) * s.hist_bucket_ns
+        end
+    end
+    return typemax(Int64)
 end
 
 function Base.show(io::IO, ::MIME"text/plain", s::LoopStats)
     n = max(s.iterations, 1)
-    println(io, "LoopStats: ", s.iterations, " iterations, ", s.overruns, " overruns, ", s.errors, " errors")
-    println(io, "  wake-up jitter: mean ", round(s.sum_wake_late_ns / n / 1e3; digits=2),
-            " µs, max ", round(s.max_wake_late_ns / 1e3; digits=2), " µs")
-    println(io, "  step latency:   mean ", round(s.sum_latency_ns / n / 1e3; digits=2),
-            " µs, max ", round(s.max_latency_ns / 1e3; digits=2), " µs")
+    us(x) = x == typemax(Int64) ? "overflow" : string(round(x / 1e3; digits=2), " µs")
+    println(io, "LoopStats: ", s.iterations, " iterations, ", s.overruns, " overruns, ", s.errors,
+            " errors", s.abort_reason === :none ? "" : string(" — ABORTED (", s.abort_reason, ")"))
+    for (label, kind, sum_, max_) in (("wake-up jitter", :wake, s.sum_wake_late_ns, s.max_wake_late_ns),
+                                      ("step latency:  ", :latency, s.sum_latency_ns, s.max_latency_ns))
+        println(io, "  ", label, " mean ", us(sum_ / n), ", p99 ≤ ", us(latency_percentile(s, 0.99; kind)),
+                ", p99.9 ≤ ", us(latency_percentile(s, 0.999; kind)), ", max ", us(max_))
+    end
     print(io, "  mlockall=", s.memory_locked, " SCHED_FIFO=", s.fifo_scheduled,
-          " pinned=", s.cpu_pinned, " gc_off=", s.gc_disabled)
+          " pinned=", s.cpu_pinned, " gc_off=", s.gc_disabled, " safe_cmd_sent=", s.safe_command_sent)
 end
 
 # --- absolute-time sleep ----------------------------------------------------
@@ -178,37 +236,78 @@ end
 
 # --- the hot loop (function barrier: fully specialized, allocation-free) ----
 
-@inline _log!(::Nothing, ws, t, late, lat, st) = nothing
-@inline _log!(ring::SPSCRing, ws, t, late, lat, st) =
-    (try_push!(ring, TelemetrySample(ws, t, late, lat, st)); nothing)
+@inline _log!(::Nothing, ws, t, late, lat, st, ovr) = nothing
+@inline _log!(ring::SPSCRing, ws, t, late, lat, st, ovr) =
+    (try_push!(ring, TelemetrySample(ws, t, late, lat, st, ovr)); nothing)
 
 function _rt_inner!(stats::LoopStats, ws::ControlWorkspace, controller!::F, backend::B,
                     period_ns::Int64, iterations::Int64, telemetry::R,
-                    ts::Base.RefValue{Timespec}) where {F,B,R}
+                    ts::Base.RefValue{Timespec}, max_ovr::Int, max_err::Int) where {F,B,R}
     next_ns = _now_ns(ts)
-    for _ in 1:iterations
+    bucket = stats.hist_bucket_ns
+    for i in 1:iterations
         next_ns += period_ns
         sleep_until!(ts, next_ns)
         t_wake = _now_ns(ts)
         st = control_step!(ws, controller!, backend)
+        hb = heartbeat!(backend, i)
+        st == HIL_OK && (st = hb)
         t_done = _now_ns(ts)
 
         late = t_wake - next_ns
         lat = t_done - t_wake
+        ovr = t_done > next_ns + period_ns
         stats.iterations += 1
         stats.sum_wake_late_ns += late
         stats.sum_latency_ns += lat
         late > stats.max_wake_late_ns && (stats.max_wake_late_ns = late)
         lat > stats.max_latency_ns && (stats.max_latency_ns = lat)
-        t_done > next_ns + period_ns && (stats.overruns += 1)
-        st != HIL_OK && (stats.errors += 1)
-        _log!(telemetry, ws, t_wake, late, lat, st)
+        _hist_add!(stats.latency_hist, bucket, lat)
+        _hist_add!(stats.wake_hist, bucket, late)
+        if ovr
+            stats.overruns += 1
+            stats.consecutive_overruns += 1
+        else
+            stats.consecutive_overruns = 0
+        end
+        if st != HIL_OK
+            stats.errors += 1
+            stats.consecutive_errors += 1
+        else
+            stats.consecutive_errors = 0
+        end
+        _log!(telemetry, ws, t_wake, late, lat, st, ovr)
+
+        if max_ovr > 0 && stats.consecutive_overruns >= max_ovr
+            stats.abort_reason = :overruns
+            break
+        elseif max_err > 0 && stats.consecutive_errors >= max_err
+            stats.abort_reason = :errors
+            break
+        end
     end
     return stats
 end
 
 """
-    run_realtime_loop!(ws, controller!, backend, cfg::RTConfig; telemetry=nothing) -> LoopStats
+    send_safe_command!(ws, backend, safe_command) -> Int32
+
+Copy `safe_command` into `ws.u_cmd` and write it to the backend, bypassing the
+controller. Used by [`run_realtime_loop!`](@ref) on watchdog trips, exceptions
+and normal exit; call it yourself from emergency-stop handlers.
+"""
+function send_safe_command!(ws::ControlWorkspace, backend::AbstractHILBackend, safe_command)
+    length(safe_command) == length(ws.u_cmd) ||
+        throw(DimensionMismatch("safe_command has length $(length(safe_command)), expected $(length(ws.u_cmd))"))
+    @inbounds for i in eachindex(ws.u_cmd)
+        ws.u_cmd[i] = safe_command[i]
+    end
+    return write_actuators!(ws.u_cmd, backend)
+end
+
+"""
+    run_realtime_loop!(ws, controller!, backend, cfg::RTConfig;
+                       telemetry=nothing, safe_command=nothing) -> LoopStats
     run_realtime_loop!(ws, controller!, backend, period_ns, iterations; kwargs...)
 
 Run `control_step!(ws, controller!, backend)` every `period_ns` nanoseconds for
@@ -218,7 +317,11 @@ Run `control_step!(ws, controller!, backend)` every `period_ns` nanoseconds for
 2. collect garbage once, then pause the GC;
 3. sleep with `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` against absolute
    deadlines, so there is no cumulative drift;
-4. restore scheduler, affinity, memory locking and GC state on exit (also on error).
+4. after each step call [`heartbeat!`](@ref)`(backend, i)` and check the
+   watchdog limits (`cfg.max_consecutive_overruns`, `cfg.max_consecutive_errors`);
+5. on exit — normal, watchdog trip or exception — write `safe_command`
+   (e.g. zero torque) if one was given, then restore scheduler, affinity, memory
+   locking and GC state. Exceptions are rethrown after that.
 
 `telemetry` may be an [`SPSCRing`](@ref) built with `SPSCRing(ws, capacity)`; one
 `TelemetrySample` is pushed per cycle (dropped, never blocking, when full).
@@ -232,24 +335,39 @@ during the loop. Run the loop on a dedicated thread (e.g. start Julia with
 `--threads=2` and keep the consumer side light).
 """
 function run_realtime_loop!(ws::ControlWorkspace, controller!, backend::AbstractHILBackend,
-                            cfg::RTConfig; telemetry::Union{Nothing,SPSCRing}=nothing)
+                            cfg::RTConfig; telemetry::Union{Nothing,SPSCRing}=nothing,
+                            safe_command=nothing)
     cfg.period_ns > 0 || throw(ArgumentError("period_ns must be positive"))
-    stats = LoopStats()
+    safe_command === nothing || length(safe_command) == length(ws.u_cmd) ||
+        throw(DimensionMismatch("safe_command must have length $(length(ws.u_cmd))"))
+    stats = LoopStats(cfg)
     ts = Ref(Timespec(0, 0))
     # Compile everything before entering the deadline-driven section.
     precompile(_rt_inner!, (typeof(stats), typeof(ws), typeof(controller!), typeof(backend),
-                            Int64, Int64, typeof(telemetry), typeof(ts)))
+                            Int64, Int64, typeof(telemetry), typeof(ts), Int, Int))
     saved = _rt_setup!(stats, cfg)
     try
-        _rt_inner!(stats, ws, controller!, backend, cfg.period_ns, cfg.iterations, telemetry, ts)
+        _rt_inner!(stats, ws, controller!, backend, cfg.period_ns, cfg.iterations, telemetry, ts,
+                   cfg.max_consecutive_overruns, cfg.max_consecutive_errors)
+    catch
+        stats.abort_reason = :exception
+        rethrow()
     finally
+        if safe_command !== nothing
+            try
+                stats.safe_command_sent = send_safe_command!(ws, backend, safe_command) == HIL_OK
+            catch err
+                @error "ArtyHill: failed to send safe command" exception = err
+            end
+        end
         _rt_teardown!(stats, saved)
     end
     return stats
 end
 
 run_realtime_loop!(ws::ControlWorkspace, controller!, backend::AbstractHILBackend,
-                   period_ns::Integer, iterations::Integer; telemetry=nothing, kwargs...) =
+                   period_ns::Integer, iterations::Integer; telemetry=nothing,
+                   safe_command=nothing, kwargs...) =
     run_realtime_loop!(ws, controller!, backend,
                        RTConfig(; period_ns=Int64(period_ns), iterations=Int64(iterations), kwargs...);
-                       telemetry)
+                       telemetry, safe_command)

@@ -2,3 +2,9 @@ Manifest.toml
 examples/Manifest.toml
 examples/build/
 examples/telemetry.csv
+docs/build/
+docs/Manifest.toml
+bench/Manifest.toml
+bench/*.csv
+bench/*.txt
+LocalPreferences.toml

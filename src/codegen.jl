@@ -33,3 +33,56 @@ raw pointers with `StaticTools.MallocVector`/`unsafe_load`. Requires
 function compile_controller end
 
 export check_loop_allocs
+
+# --- further extension entry points ------------------------------------------
+
+"""
+    juliac_build(file; output, kind=:lib, trim="safe", project="", bundle=nothing,
+                 ccallables=true, verbose=false) -> String
+
+Build `file` with Julia 1.12's `juliac` (via JuliaC.jl) into a shared library
+(`kind=:lib`, exporting every `Base.@ccallable` function) or an executable
+(`kind=:exe`, `file` must define `@main`). Unlike [`compile_controller`](@ref),
+the result links a *trimmed* `libjulia`, so it supports far more of the
+language (exceptions, most of Base) at the cost of a runtime dependency; pass
+`bundle="dir"` to copy that runtime next to the output for deployment.
+Requires Julia ≥ 1.12 and `using JuliaC`.
+"""
+function juliac_build end
+
+"""
+    pid_bank(pids...; setpoints=zeros, inputs=1:M) -> controller
+
+Turn `M` `DiscretePIDs.DiscretePID`s into one allocation-free ArtyHill
+controller: `u[k] = calculate_control!(pids[k], setpoint[k], y[inputs[k]])`.
+Change references at run time with `bank.setpoint[k] = r`. Requires `using DiscretePIDs`.
+"""
+function pid_bank end
+
+"""
+    verijul_backend(dut; inputs, outputs, clock=:clk, cycles_per_step=1,
+                    input_scale=1.0, output_scale=1.0, signed_outputs=true) -> AbstractHILBackend
+
+Co-simulate RTL as the "hardware": a VeriJul.jl `DUT` (Verilator model) becomes
+a backend. Each `write_actuators!` converts `u[k] * input_scale[k]` to an
+integer on input port `inputs[k]` and clocks the design `cycles_per_step`
+times; `read_sensors!` reads output port `outputs[k]` (two's complement when
+`signed_outputs`) divided by `output_scale[k]`. Ports must be ≤ 64 bits.
+Use it to test FPGA logic (PWM generators, encoder decoders, current loops)
+against the Julia controller before synthesis. Requires `using VeriJul`.
+"""
+function verijul_backend end
+
+"""
+    clean_telemetry(csv_path; outliers="hampel", resample=nothing,
+                    resample_method="linear", columns=nothing) -> DataFrame
+
+Post-process a telemetry CSV written by [`write_telemetry_csv`](@ref) with
+KaosCleaner.jl: outliers in the measurement/command columns (`y*`, `u*`, or
+`columns`) become missing, and with `resample="1ms"` the log is put on a
+regular time grid, ready for system identification. Requires Julia ≥ 1.12 and
+`using KaosCleaner` (install from https://github.com/rainerrodrigues/KaosCleaner).
+"""
+function clean_telemetry end
+
+export juliac_build, pid_bank, verijul_backend, clean_telemetry

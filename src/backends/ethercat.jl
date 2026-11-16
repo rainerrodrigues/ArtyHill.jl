@@ -39,13 +39,29 @@ end
 """
     LIBSOEM
 
-Library name used for SOEM calls. It is a compile-time constant so that hot-path
-`ccall`s bind statically (no indirect function-pointer call, which also lets
-AllocCheck prove the step allocation-free). Put SOEM 1.4 built as a shared
-library (`-DBUILD_SHARED_LIBS=ON`) on the loader path as `libsoem.so`
-(`ldconfig` or `LD_LIBRARY_PATH`).
+Library used for SOEM calls (default `"libsoem"`, found via the system loader
+path). It is a compile-time constant so hot-path `ccall`s bind statically (no
+indirect function-pointer call, which also lets AllocCheck prove the step
+allocation-free). Change it with [`set_libsoem!`](@ref), which stores a
+Preferences.jl setting and takes effect after restarting Julia.
+
+Build SOEM 1.4 as a shared library: `cmake -DBUILD_SHARED_LIBS=ON .. && make && sudo make install`.
 """
-const LIBSOEM = "libsoem"
+const LIBSOEM = @load_preference("libsoem", "libsoem")
+
+"""
+    set_libsoem!(path)
+
+Point ArtyHill at a specific SOEM shared library (absolute path or soname).
+Saved in `LocalPreferences.toml` of the active project; restart Julia to apply.
+"""
+function set_libsoem!(path::AbstractString)
+    @set_preferences!("libsoem" => String(path))
+    @info "ArtyHill: SOEM library set to $(repr(path)); restart Julia for it to take effect."
+    return path
+end
+
+export set_libsoem!
 
 """
     EtherCATBackend(iface; output_bytes, iomap_size=4096, codec=PackedFloat64Codec())
