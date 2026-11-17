@@ -40,9 +40,13 @@ Process-image codec for `N` CiA 402 axes, for use with
 - **State machine**: on every cycle the statusword is decoded and the
   controlword advances the drive towards *Operation enabled* — but only while
   [`cia402_enable!`](@ref)`(codec, true)` is set. Disabled, the drive is held in
-  *Ready to switch on* (no torque). A fault is reset automatically only with
-  `auto_fault_reset=true`. In `:csp`, the target follows the actual position until
-  the axis is enabled, so enabling never causes a jump.
+  *Ready to switch on* (no torque). In `:csp`, the target follows the actual
+  position until the axis is enabled, so enabling never causes a jump.
+- **Faults**: a fault on *any* axis clears the enable flag for all axes, so after
+  a reset nothing re-energizes until you call `cia402_enable!(codec, true)` again.
+  Request a reset with [`cia402_fault_reset!`](@ref), or pass
+  `auto_fault_reset=true` to reset automatically (enable stays cleared either way).
+  The reset is sent as rising edges on controlword bit 7 until the drive leaves *Fault*.
 """
 struct CiA402Codec{N}
     layout::CiA402Layout
@@ -55,6 +59,7 @@ struct CiA402Codec{N}
     statusword::MVector{N,UInt16}
     controlword::MVector{N,UInt16}
     position_raw::MVector{N,Int32}
+    reset_request::MVector{N,Bool}
 end
 
 function CiA402Codec{N}(layout::CiA402Layout; mode::Symbol=:csp, position_scale::Real=1.0,
@@ -63,11 +68,26 @@ function CiA402Codec{N}(layout::CiA402Layout; mode::Symbol=:csp, position_scale:
     haskey(CIA402_MODE, mode) || throw(ArgumentError("mode must be :csp, :csv or :cst"))
     return CiA402Codec{N}(layout, CIA402_MODE[mode], position_scale, velocity_scale, torque_scale,
                           auto_fault_reset, Ref(false), zeros(MVector{N,UInt16}),
-                          zeros(MVector{N,UInt16}), zeros(MVector{N,Int32}))
+                          zeros(MVector{N,UInt16}), zeros(MVector{N,Int32}), zeros(MVector{N,Bool}))
 end
 
 "Allow (`true`) or forbid (`false`) the state machine to enable the drives."
 cia402_enable!(c::CiA402Codec, on::Bool) = (c.enable[] = on; c)
+
+"""
+    cia402_fault_reset!(codec, axis=:all)
+
+Request a fault reset for one axis (or all). The codec then pulses controlword
+bit 7 until the drive leaves *Fault*. The drive ends up in *Switch on disabled*;
+re-enable explicitly with [`cia402_enable!`](@ref).
+"""
+function cia402_fault_reset!(c::CiA402Codec{N}, axis=:all) where {N}
+    axes = axis === :all ? (1:N) : (axis:axis)
+    for k in axes
+        c.reset_request[k] = true
+    end
+    return c
+end
 
 """
     cia402_state(statusword) -> Symbol
@@ -93,8 +113,9 @@ end
 cia402_state(c::CiA402Codec, axis::Integer) = cia402_state(c.statusword[axis])
 
 # Next controlword for a given state (CiA 402 transitions 2, 3, 4, 15).
-@inline function _cia402_next_cw(state::Symbol, enable::Bool, auto_reset::Bool)
-    state === :fault && return auto_reset ? 0x0080 : 0x0000           # fault reset / disable voltage
+# `reset` requests a fault reset: bit 7 is toggled so the drive sees rising edges.
+@inline function _cia402_next_cw(state::Symbol, enable::Bool, reset::Bool, prev_cw::UInt16)
+    state === :fault && return (reset && (prev_cw & 0x0080) == 0) ? 0x0080 : 0x0000
     state === :fault_reaction && return 0x0000
     state === :quick_stop && return 0x0000                             # → switch on disabled
     enable || return 0x0006                                            # shutdown: hold "ready to switch on"
@@ -110,13 +131,22 @@ end
 
 @inline function decode_inputs!(y, c::CiA402Codec{N}, p::Ptr{UInt8}) where {N}
     L = c.layout
+    # Pass 1: latch statuswords; any fault drops the shared enable flag.
     @inbounds for k in 1:N
         q = p + (k - 1) * L.in_stride
         sw = _ld(UInt16, q, L.statusword)
-        pos = _ld(Int32, q, L.position_actual)
         c.statusword[k] = sw
+        st = cia402_state(sw)
+        (st === :fault || st === :fault_reaction) && (c.enable[] = false)
+    end
+    @inbounds for k in 1:N
+        q = p + (k - 1) * L.in_stride
+        pos = _ld(Int32, q, L.position_actual)
         c.position_raw[k] = pos
-        c.controlword[k] = _cia402_next_cw(cia402_state(sw), c.enable[], c.auto_fault_reset)
+        st = cia402_state(c.statusword[k])
+        st === :fault || (c.reset_request[k] = false)
+        reset = c.auto_fault_reset || c.reset_request[k]
+        c.controlword[k] = _cia402_next_cw(st, c.enable[], reset, c.controlword[k])
         j = firstindex(y) + 3 * (k - 1)
         if j + 2 <= lastindex(y)
             y[j]     = pos / c.position_scale
@@ -154,4 +184,4 @@ end
     return unsafe_trunc(T, clamp(round(x), Float64(typemin(T)), Float64(typemax(T))))
 end
 
-export CiA402Layout, CiA402Codec, cia402_enable!, cia402_state
+export CiA402Layout, CiA402Codec, cia402_enable!, cia402_state, cia402_fault_reset!

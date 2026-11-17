@@ -239,9 +239,21 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
         @test cycle!([NaN])[2] == 0
 
         setin!(0x0218, Int32(0), Int32(0), Int16(0)); @test cycle!([0.0])[1] == 0x0000  # no auto reset
+        @test c.enable[] == false                  # a fault latches enable off
+        cia402_fault_reset!(c)
+        @test cycle!([0.0])[1] == 0x0080           # rising edge on bit 7 ...
+        @test cycle!([0.0])[1] == 0x0000           # ... then low, so the next edge is a new one
+        @test cycle!([0.0])[1] == 0x0080
+        setin!(0x0250, Int32(0), Int32(0), Int16(0)); @test cycle!([0.0])[1] == 0x0006
+        @test c.reset_request[1] == false          # cleared once the fault is gone
+        @test c.enable[] == false                  # still needs an explicit re-enable
+        cia402_enable!(c, true)
         c2 = CiA402Codec{1}(L; auto_fault_reset=true)
-        GC.@preserve inb begin ArtyHill.decode_inputs!(y, c2, pointer(inb)) end
-        @test c2.controlword[1] == 0x0080
+        setin!(0x0218, Int32(0), Int32(0), Int16(0))
+        dec2!() = GC.@preserve inb begin ArtyHill.decode_inputs!(y, c2, pointer(inb)) end
+        dec2!(); @test c2.controlword[1] == 0x0080
+        dec2!(); @test c2.controlword[1] == 0x0000      # auto reset also pulses
+        dec2!(); @test c2.controlword[1] == 0x0080
         cia402_enable!(c, false)
         setin!(0x0237, Int32(10), Int32(0), Int16(0)); @test cycle!([2.5])[1:2] == (0x0006, 10)
     end
@@ -329,6 +341,12 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
             @test close_backend!(b) == HIL_OK
             VeriJul.destroy!(dut)
         end
+    end
+
+    if haskey(ENV, "ARTYHILL_ETHERCAT")
+        include("hardware/ethercat.jl")
+    else
+        @info "Skipping EtherCAT end-to-end tests (run test/ethercat/run.sh)"
     end
 
     if haskey(ENV, "ARTYHILL_VCAN")

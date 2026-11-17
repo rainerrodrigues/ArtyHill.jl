@@ -39,6 +39,18 @@ steps the drive's state machine towards *Operation enabled* (only after
 [`cia402_enable!`](@ref)), scales targets and feedback, and in CSP mode keeps the
 target on the actual position until the drive is enabled.
 
+A fault on any axis latches the enable flag off. Clear it with
+[`cia402_fault_reset!`](@ref), which pulses controlword bit 7 until the drive
+leaves *Fault*, then re-enable explicitly. Nothing re-energizes on its own.
+
+### Testing without hardware
+
+`test/ethercat/run.sh` builds SOEM 1.4 and runs the unmodified master against
+`test/ethercat/ecat_emu.c`, a frame-level emulator of a line of CiA 402 drives,
+over a veth pair in an unprivileged network namespace. It covers the slave scan
+(SII EEPROM), FMMU/SM configuration, the transition to OP, CSP motion, faults,
+and a simulated cable pull.
+
 ## Integration tests on a virtual bus
 
 ```bash

@@ -56,6 +56,28 @@ jobs:
           ARTYHILL_VCAN: vcan0
           JULIA_NUM_THREADS: '2'
 
+  ethercat:
+    # Real SOEM 1.4 master ↔ emulated CiA 402 drives over a veth pair, inside
+    # an unprivileged user + network namespace (test/ethercat/run.sh).
+    name: EtherCAT (SOEM ↔ emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04 restricts them via AppArmor by default.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.11'
+      - uses: julia-actions/cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/artyhill-soem
+          key: soem-1.4.0-${{ runner.os }}
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run EtherCAT end-to-end tests
+        run: test/ethercat/run.sh
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

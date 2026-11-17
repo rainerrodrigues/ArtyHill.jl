@@ -64,6 +64,14 @@ sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set v
 ARTYHILL_VCAN=vcan0 julia --threads=2 --project -e 'using Pkg; Pkg.test()'
 ```
 
+EtherCAT end to end, with no hardware and no root: the real SOEM 1.4 master (downloaded and built once)
+talks over a veth pair to [an emulator](test/ethercat/ecat_emu.c) of CiA 402 drives, inside an
+unprivileged network namespace:
+
+```bash
+test/ethercat/run.sh
+```
+
 Latency against `cyclictest`, on a PREEMPT_RT machine:
 
 ```bash
@@ -83,12 +91,15 @@ sudo ./bench/compare_cyclictest.sh 1000 100000 3 80
 
 ## Status
 
-- Tests pass on Julia 1.11 and 1.12 (CI also covers 1.10).
+- Tests pass on Julia 1.10, 1.11 and 1.12.
+- `SocketCANBackend` runs real socket I/O on `vcan0` in CI (classic CAN, CAN FD, heartbeat).
+- `EtherCATBackend` + `CiA402Codec` run against the real SOEM 1.4 master and emulated drives: scan, OP,
+  process-image layout, 1 kHz CSP motion, bump-free enable, fault latch and reset, and cable-pull watchdog.
+  The emulator models the parts of an ESC that SOEM uses without a mailbox (no CoE/SDO, no distributed clocks).
 - The VeriJul backend is exercised against a gcc-compiled stand-in for a Verilated model. It has not been run
   against Verilator output yet.
-- **Not yet run on physical hardware:** `SocketCANBackend` (the vcan tests exist but haven't been run),
-  `EtherCATBackend` and `CiA402Codec` (unit-tested on synthetic process images only).
-  Use `vcan0` and a bench drive with hardware interlocks before connecting anything that moves.
+- **Not yet run on physical hardware.** Real drives differ (PDO mapping via CoE, DC sync, vendor quirks):
+  use a bench drive with hardware interlocks before connecting anything that moves.
 - `KaosCleaner` is not in the General registry, so registering ArtyHill there requires dropping that weak
   dependency (or registering KaosCleaner first).
 
