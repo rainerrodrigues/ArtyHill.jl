@@ -1,6 +1,9 @@
 # ArtyHill.jl
 
 [![CI](https://github.com/rainerrodrigues/ArtyHill.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/rainerrodrigues/ArtyHill.jl/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://rainerrodrigues.github.io/ArtyHill.jl/dev/)
+[![codecov](https://codecov.io/gh/rainerrodrigues/ArtyHill.jl/graph/badge.svg)](https://codecov.io/gh/rainerrodrigues/ArtyHill.jl)
+[![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Hardware-in-the-Loop (HIL) and real-time embedded prototyping in Julia. One controller, unchanged,
@@ -9,8 +12,8 @@ co-simulation, and finally ships as a C-callable library.
 
 | Layer | What's in it |
 | --- | --- |
-| **Hardware abstraction** | `SimulationBackend` (`DiscreteLinearPlant`, `NonlinearPlant`) · `SocketCANBackend` (classic + CAN FD, kernel filters, heartbeat) · `EtherCATBackend` (SOEM 1.4) with `CiA402Codec` · `verijul_backend` (RTL co-simulation) |
-| **Deterministic runtime** | `ControlWorkspace` · `control_step!` · `run_realtime_loop!` (`mlockall`, CPU pinning, `SCHED_FIFO`, GC pause, `clock_nanosleep(TIMER_ABSTIME)`, latency histograms) · `SPSCRing` lock-free telemetry |
+| **Hardware abstraction** | `SimulationBackend` (`DiscreteLinearPlant`, `NonlinearPlant`) · `SocketCANBackend` (classic + CAN FD, kernel filters, heartbeat) · `EtherCATBackend` (SOEM 1.4: CoE/SDO drive configuration, DC Sync0 with loop phase lock) with `CiA402Codec` · `verijul_backend` (RTL co-simulation) |
+| **Deterministic runtime** | `ControlWorkspace` · `control_step!` · `run_realtime_loop!` (`mlockall`, CPU pinning, `SCHED_FIFO`, GC pause, `clock_nanosleep(TIMER_ABSTIME)`, latency histograms) · `spawn_realtime_loop` on a dedicated thread · `SPSCRing` lock-free telemetry |
 | **Safety** | `LimitedController` (clamp, rate limit, NaN guard) · watchdog on consecutive overruns/errors · `safe_command` on every exit · `heartbeat!` hook |
 | **Verification & codegen** | `check_step_allocs` / `check_loop_allocs` (AllocCheck) · `compile_controller` (StaticCompiler, libc-only `.so`) · `juliac_build` (Julia 1.12 `juliac`) · `clean_telemetry` (KaosCleaner) |
 
@@ -36,7 +39,9 @@ close_backend!(backend)
 latency_percentile(stats, 0.999; kind=:wake)            # jitter, ns
 ```
 
-Examples: [sim_hil.jl](examples/sim_hil.jl) (1 kHz run with a telemetry consumer),
+Examples: [cycloidal_drive.jl](examples/cycloidal_drive.jl) (reducer geometry → simulation →
+identification from telemetry → controller sweep; see the [walkthrough](docs/src/examples.md)),
+[sim_hil.jl](examples/sim_hil.jl) (1 kHz run with a telemetry consumer),
 [codegen_controller.jl](examples/codegen_controller.jl) (StaticCompiler → `pd_controller.so`, libc only),
 [juliac_controller.jl](examples/juliac_controller.jl) (juliac → C library wrapping a `LimitedController`).
 
@@ -91,16 +96,18 @@ sudo ./bench/compare_cyclictest.sh 1000 100000 3 80
 
 ## Status
 
-- Tests pass on Julia 1.10, 1.11 and 1.12.
+- Tests pass on Julia 1.10, 1.11 and 1.12, with Aqua quality checks and JET static analysis in CI.
 - `SocketCANBackend` runs real socket I/O on `vcan0` in CI (classic CAN, CAN FD, heartbeat).
-- `EtherCATBackend` + `CiA402Codec` run against the real SOEM 1.4 master and emulated drives: scan, OP,
-  process-image layout, 1 kHz CSP motion, bump-free enable, fault latch and reset, and cable-pull watchdog.
-  The emulator models the parts of an ESC that SOEM uses without a mailbox (no CoE/SDO, no distributed clocks).
-- The VeriJul backend is exercised against a gcc-compiled stand-in for a Verilated model. It has not been run
-  against Verilator output yet.
-- **Not yet run on physical hardware.** Real drives differ (PDO mapping via CoE, DC sync, vendor quirks):
-  use a bench drive with hardware interlocks before connecting anything that moves.
-- `KaosCleaner` is not in the General registry, so registering ArtyHill there requires dropping that weak
-  dependency (or registering KaosCleaner first).
+- `EtherCATBackend` + `CiA402Codec` run in CI against the real SOEM 1.4 master and emulated drives:
+  - scan and process-image layout;
+  - CoE SDO configuration with real abort codes, and PDO remapping;
+  - drives that refuse OP without DC Sync0, and loop phase-locking to the DC clock;
+  - 1 kHz CSP motion, bump-free enable, fault latch and reset, and a cable-pull watchdog.
+- The VeriJul backend runs against real Verilator-compiled RTL in CI, as well as a C stand-in.
+- **Not yet run on physical hardware.** The emulator follows the EtherCAT and CiA 402 specs, but real drives
+  add vendor quirks, segmented SDO transfers and stricter DC timing. Use a bench drive with hardware
+  interlocks before connecting anything that moves.
+- **No PREEMPT_RT numbers yet.** `bench/compare_cyclictest.sh` is ready but has only run on a stock kernel.
 
-See the [documentation](docs/src/index.md) for guides on backends, the real-time loop, safety and code generation.
+See the [documentation](https://rainerrodrigues.github.io/ArtyHill.jl/dev/) for guides on backends, the
+real-time loop, safety, code generation and the cycloidal-drive example.

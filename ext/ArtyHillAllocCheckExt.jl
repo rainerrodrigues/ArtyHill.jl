@@ -13,7 +13,8 @@ function ArtyHill.check_loop_allocs(ws::ControlWorkspace, controller!, backend::
                                     telemetry=nothing)
     return AllocCheck.check_allocs(_rt_inner!,
                                    (LoopStats, typeof(ws), typeof(controller!), typeof(backend),
-                                    Int64, Int64, typeof(telemetry), Base.RefValue{Timespec}, Int, Int))
+                                    Int64, Int64, typeof(telemetry), Base.RefValue{Timespec}, Int, Int,
+                                    Threads.Atomic{Bool}))
 end
 
 end

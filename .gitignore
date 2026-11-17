@@ -8,3 +8,6 @@ bench/Manifest.toml
 bench/*.csv
 bench/*.txt
 LocalPreferences.toml
+test/jet/Manifest.toml
+*.cov
+lcov.info

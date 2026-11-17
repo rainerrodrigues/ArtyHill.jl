@@ -26,6 +26,41 @@ Base.@kwdef struct CiA402Layout
 end
 
 """
+    CiA402Layout(rx_entries, tx_entries)
+
+Derive the layout from the PDO mapping you program with [`configure_pdo!`](@ref),
+so the two cannot drift apart. `rx_entries` (outputs) may contain `0x6040`
+controlword, `0x607A`/`0x60FF`/`0x6071` target and `0x6060` mode; `tx_entries`
+(inputs) `0x6041` statusword, `0x6064` position, `0x606C` velocity and `0x6077`
+torque. Other objects and padding just advance the offset. Strides are the PDO sizes.
+"""
+function CiA402Layout(rx::AbstractVector{PDOEntry}, tx::AbstractVector{PDOEntry})
+    function offsets(entries)
+        off = Dict{UInt16,Int}()
+        bit = 0
+        for e in entries
+            bit % 8 == 0 || throw(ArgumentError("PDO entries must be byte-aligned"))
+            e.index == 0 || get!(off, e.index, bit ÷ 8)
+            bit += e.bits
+        end
+        bit % 8 == 0 || throw(ArgumentError("PDO size must be a whole number of bytes"))
+        return off, bit ÷ 8
+    end
+    ro, rsize = offsets(rx)
+    to, tsize = offsets(tx)
+    targets = [k for k in (0x607A, 0x60FF, 0x6071) if haskey(ro, k)]
+    length(targets) <= 1 || throw(ArgumentError("map exactly one target object (0x607A, 0x60FF or 0x6071)"))
+    return CiA402Layout(; out_stride=rsize, in_stride=tsize,
+                        controlword=get(ro, 0x6040, -1),
+                        target=isempty(targets) ? -1 : ro[only(targets)],
+                        mode_of_operation=get(ro, 0x6060, -1),
+                        statusword=get(to, 0x6041, -1),
+                        position_actual=get(to, 0x6064, -1),
+                        velocity_actual=get(to, 0x606C, -1),
+                        torque_actual=get(to, 0x6077, -1))
+end
+
+"""
     CiA402Codec{N}(layout; mode=:csp, position_scale=1.0, velocity_scale=1.0,
                    torque_scale=1.0, auto_fault_reset=false)
 

@@ -240,9 +240,12 @@ end
 @inline _log!(ring::SPSCRing, ws, t, late, lat, st, ovr) =
     (try_push!(ring, TelemetrySample(ws, t, late, lat, st, ovr)); nothing)
 
+@inline _stop_requested(::Nothing) = false
+@inline _stop_requested(flag::Threads.Atomic{Bool}) = flag[]
+
 function _rt_inner!(stats::LoopStats, ws::ControlWorkspace, controller!::F, backend::B,
                     period_ns::Int64, iterations::Int64, telemetry::R,
-                    ts::Base.RefValue{Timespec}, max_ovr::Int, max_err::Int) where {F,B,R}
+                    ts::Base.RefValue{Timespec}, max_ovr::Int, max_err::Int, stop::S) where {F,B,R,S}
     next_ns = _now_ns(ts)
     bucket = stats.hist_bucket_ns
     for i in 1:iterations
@@ -277,8 +280,12 @@ function _rt_inner!(stats::LoopStats, ws::ControlWorkspace, controller!::F, back
             stats.consecutive_errors = 0
         end
         _log!(telemetry, ws, t_wake, late, lat, st, ovr)
+        next_ns += cycle_correction_ns(backend, period_ns)   # e.g. DC phase lock
 
-        if max_ovr > 0 && stats.consecutive_overruns >= max_ovr
+        if _stop_requested(stop)
+            stats.abort_reason = :stopped
+            break
+        elseif max_ovr > 0 && stats.consecutive_overruns >= max_ovr
             stats.abort_reason = :overruns
             break
         elseif max_err > 0 && stats.consecutive_errors >= max_err
@@ -307,7 +314,7 @@ end
 
 """
     run_realtime_loop!(ws, controller!, backend, cfg::RTConfig;
-                       telemetry=nothing, safe_command=nothing) -> LoopStats
+                       telemetry=nothing, safe_command=nothing, stop=nothing) -> LoopStats
     run_realtime_loop!(ws, controller!, backend, period_ns, iterations; kwargs...)
 
 Run `control_step!(ws, controller!, backend)` every `period_ns` nanoseconds for
@@ -317,7 +324,8 @@ Run `control_step!(ws, controller!, backend)` every `period_ns` nanoseconds for
 2. collect garbage once, then pause the GC;
 3. sleep with `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` against absolute
    deadlines, so there is no cumulative drift;
-4. after each step call [`heartbeat!`](@ref)`(backend, i)` and check the
+4. after each step call [`heartbeat!`](@ref)`(backend, i)`, shift the next
+   deadline by [`cycle_correction_ns`](@ref) (DC phase lock), and check the
    watchdog limits (`cfg.max_consecutive_overruns`, `cfg.max_consecutive_errors`);
 5. on exit — normal, watchdog trip or exception — write `safe_command`
    (e.g. zero torque) if one was given, then restore scheduler, affinity, memory
@@ -325,6 +333,9 @@ Run `control_step!(ws, controller!, backend)` every `period_ns` nanoseconds for
 
 `telemetry` may be an [`SPSCRing`](@ref) built with `SPSCRing(ws, capacity)`; one
 `TelemetrySample` is pushed per cycle (dropped, never blocking, when full).
+`stop` may be a `Threads.Atomic{Bool}`: setting it ends the loop after the
+current cycle (`abort_reason = :stopped`, safe command still sent). To run the
+loop on its own thread, see [`spawn_realtime_loop`](@ref).
 
 The backend is *not* initialized or closed here — call `init_backend!` /
 `close_backend!` around it. Run a warm-up (e.g. a few `control_step!` calls) first
@@ -336,7 +347,7 @@ during the loop. Run the loop on a dedicated thread (e.g. start Julia with
 """
 function run_realtime_loop!(ws::ControlWorkspace, controller!, backend::AbstractHILBackend,
                             cfg::RTConfig; telemetry::Union{Nothing,SPSCRing}=nothing,
-                            safe_command=nothing)
+                            safe_command=nothing, stop::Union{Nothing,Threads.Atomic{Bool}}=nothing)
     cfg.period_ns > 0 || throw(ArgumentError("period_ns must be positive"))
     safe_command === nothing || length(safe_command) == length(ws.u_cmd) ||
         throw(DimensionMismatch("safe_command must have length $(length(ws.u_cmd))"))
@@ -344,11 +355,11 @@ function run_realtime_loop!(ws::ControlWorkspace, controller!, backend::Abstract
     ts = Ref(Timespec(0, 0))
     # Compile everything before entering the deadline-driven section.
     precompile(_rt_inner!, (typeof(stats), typeof(ws), typeof(controller!), typeof(backend),
-                            Int64, Int64, typeof(telemetry), typeof(ts), Int, Int))
+                            Int64, Int64, typeof(telemetry), typeof(ts), Int, Int, typeof(stop)))
     saved = _rt_setup!(stats, cfg)
     try
         _rt_inner!(stats, ws, controller!, backend, cfg.period_ns, cfg.iterations, telemetry, ts,
-                   cfg.max_consecutive_overruns, cfg.max_consecutive_errors)
+                   cfg.max_consecutive_overruns, cfg.max_consecutive_errors, stop)
     catch
         stats.abort_reason = :exception
         rethrow()
@@ -367,7 +378,72 @@ end
 
 run_realtime_loop!(ws::ControlWorkspace, controller!, backend::AbstractHILBackend,
                    period_ns::Integer, iterations::Integer; telemetry=nothing,
-                   safe_command=nothing, kwargs...) =
+                   safe_command=nothing, stop=nothing, kwargs...) =
     run_realtime_loop!(ws, controller!, backend,
                        RTConfig(; period_ns=Int64(period_ns), iterations=Int64(iterations), kwargs...);
-                       telemetry, safe_command)
+                       telemetry, safe_command, stop)
+
+# --- running the loop on a dedicated thread ------------------------------------
+
+"""
+    RealtimeLoop
+
+Handle returned by [`spawn_realtime_loop`](@ref). `stop_loop!(h)` asks the loop
+to finish its current cycle and exit; `fetch(h)` waits and returns the
+[`LoopStats`](@ref) (rethrowing any error from the loop); `istaskdone(h)` polls.
+"""
+struct RealtimeLoop
+    task::Task
+    stop::Threads.Atomic{Bool}
+    thread::Int
+end
+
+"Ask a spawned real-time loop to stop after its current cycle. Returns the handle."
+stop_loop!(h::RealtimeLoop) = (h.stop[] = true; h)
+Base.fetch(h::RealtimeLoop) = fetch(h.task)
+Base.wait(h::RealtimeLoop) = (wait(h.task); h)
+Base.istaskdone(h::RealtimeLoop) = istaskdone(h.task)
+
+"Julia worker threads that can run tasks (excludes foreign/adopted thread slots)."
+_worker_threads() = [t for t in 1:Threads.maxthreadid() if Threads.threadpool(t) in (:default, :interactive)]
+
+"Default thread for [`spawn_realtime_loop`](@ref): the last thread of the `:default` pool."
+default_rt_thread() = last(t for t in _worker_threads() if Threads.threadpool(t) === :default)
+
+"""
+    spawn_realtime_loop(ws, controller!, backend, cfg::RTConfig;
+                        thread=default_rt_thread(), telemetry=nothing, safe_command=nothing) -> RealtimeLoop
+    spawn_realtime_loop(ws, controller!, backend, period_ns, iterations; thread, kwargs...)
+
+Run [`run_realtime_loop!`](@ref) on Julia thread `thread` (default: the last
+thread of the `:default` pool), leaving the calling thread free for telemetry,
+UI or a REPL. The task is pinned to that thread and never yields while the loop
+runs, so the `SCHED_FIFO`/CPU-affinity settings apply to exactly that OS thread.
+Start Julia with at least two threads (`julia --threads=2`). Use
+`iterations=typemax(Int64)` with [`stop_loop!`](@ref) for an open-ended run.
+"""
+function spawn_realtime_loop(ws::ControlWorkspace, controller!, backend::AbstractHILBackend, cfg::RTConfig;
+                             thread::Integer=default_rt_thread(), telemetry=nothing, safe_command=nothing)
+    workers = _worker_threads()
+    thread in workers || throw(ArgumentError("thread must be one of the Julia worker threads $workers"))
+    if thread == Threads.threadid()
+        @warn "ArtyHill: real-time loop spawned on the calling thread $thread; start Julia with " *
+              "--threads=2 (or more) to give it a thread of its own"
+    end
+    stop = Threads.Atomic{Bool}(false)
+    task = Task(() -> run_realtime_loop!(ws, controller!, backend, cfg; telemetry, safe_command, stop))
+    task.sticky = true
+    ccall(:jl_set_task_tid, Cint, (Any, Cint), task, thread - 1) == 1 ||
+        throw(ArgumentError("could not place the loop on thread $thread"))
+    schedule(task)
+    return RealtimeLoop(task, stop, Int(thread))
+end
+
+spawn_realtime_loop(ws::ControlWorkspace, controller!, backend::AbstractHILBackend,
+                    period_ns::Integer, iterations::Integer; thread::Integer=default_rt_thread(),
+                    telemetry=nothing, safe_command=nothing, kwargs...) =
+    spawn_realtime_loop(ws, controller!, backend,
+                        RTConfig(; period_ns=Int64(period_ns), iterations=Int64(iterations), kwargs...);
+                        thread, telemetry, safe_command)
+
+export RealtimeLoop, spawn_realtime_loop, stop_loop!

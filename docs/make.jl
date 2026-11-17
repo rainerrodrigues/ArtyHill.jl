@@ -14,6 +14,7 @@ makedocs(;
             "Code generation" => "codegen.md",
             "Ecosystem extensions" => "extensions.md",
         ],
+        "Example: cycloidal drive" => "examples.md",
         "API reference" => "api.md",
     ],
     warnonly = [:missing_docs],

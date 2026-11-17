@@ -35,7 +35,8 @@ inner() {
     # The namespace has no route to the internet: resolve the test env offline
     # from what `prefetch` downloaded.
     JULIA_PKG_OFFLINE=true ARTYHILL_ETHERCAT=ecat0 ARTYHILL_ETHERCAT_PEER=ecat1 ARTYHILL_LIBSOEM_DIR="$CACHE" \
-        "$JULIA" --threads=2 --project="$ROOT" -e 'using Pkg; Pkg.test()'
+        ARTYHILL_SOEM_SRC="$CACHE/SOEM-$SOEM_VER" \
+        "$JULIA" --threads=2 --project="$ROOT" -e 'using Pkg; Pkg.test(; coverage=get(ENV, "ARTYHILL_COVERAGE", "") == "1")'
 }
 
 # Download the package and its test-only dependencies while we still have network.

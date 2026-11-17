@@ -11,6 +11,25 @@
 If a setup step fails without `strict=true`, the loop warns and continues in
 soft real-time mode. [`LoopStats`](@ref) records which steps were actually applied.
 
+## Running on a dedicated thread
+
+[`spawn_realtime_loop`](@ref) runs the same loop on a Julia worker thread of its
+own (by default the last thread of the `:default` pool) and returns at once.
+The calling thread stays free for telemetry, plotting or a REPL:
+
+```julia
+# julia --threads=2
+h = spawn_realtime_loop(ws, ctrl, backend, 1_000_000, typemax(Int64);
+                        telemetry=ring, priority=80, cpu=3, safe_command=[0.0])
+# ... drain `ring`, watch, tweak setpoints ...
+stop_loop!(h)              # finishes the current cycle, sends the safe command
+stats = fetch(h)           # LoopStats; abort_reason === :stopped
+```
+
+The task is pinned to its thread and never yields during the loop, so
+`SCHED_FIFO` and CPU affinity apply to exactly that OS thread. Any
+`run_realtime_loop!` also accepts `stop=Threads.Atomic{Bool}(false)` directly.
+
 ## Checklist
 
 - PREEMPT_RT kernel; isolate a core (`isolcpus=3 nohz_full=3 rcu_nocbs=3`) and pass `cpu=3`.

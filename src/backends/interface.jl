@@ -36,6 +36,15 @@ Must be allocation-free.
 @inline heartbeat!(::AbstractHILBackend, ::Integer) = HIL_OK
 
 """
+    cycle_correction_ns(backend, period_ns) -> Int64
+
+Called by [`run_realtime_loop!`](@ref) once per cycle; the result is added to
+the next wake-up deadline. Backends with their own clock (EtherCAT distributed
+clocks) use it to phase-lock the loop to the bus. Default: `0`. Must be allocation-free.
+"""
+@inline cycle_correction_ns(::AbstractHILBackend, ::Int64) = Int64(0)
+
+"""
     fixed_cstring(s, Val(N)) -> NTuple{N,UInt8}
 
 Pack `s` into a NUL-terminated fixed-size buffer (for interface names etc.).

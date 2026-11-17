@@ -21,7 +21,7 @@ using Libdl
 using Preferences
 
 export AbstractHILBackend, SimulationBackend, SocketCANBackend, EtherCATBackend
-export init_backend!, read_sensors!, write_actuators!, close_backend!, heartbeat!
+export init_backend!, read_sensors!, write_actuators!, close_backend!, heartbeat!, cycle_correction_ns
 export AbstractPlant, DiscreteLinearPlant, plant_output!, plant_step!, reset_plant!
 export ControlWorkspace, control_step!, StaticFeedback, LimitedController
 export RTConfig, LoopStats, run_realtime_loop!, monotonic_ns, latency_percentile, send_safe_command!

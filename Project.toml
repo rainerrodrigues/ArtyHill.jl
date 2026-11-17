@@ -26,24 +26,27 @@ ArtyHillStaticCompilerExt = ["StaticCompiler", "StaticTools"]
 ArtyHillVeriJulExt = "VeriJul"
 
 [compat]
+Aqua = "0.8"
 AllocCheck = "0.2.8"
 DiscretePIDs = "1"
+JuliaC = "0.3"
+KaosCleaner = "0.7"
 Libdl = "1"
 Preferences = "1.4"
 StaticArrays = "1.9"
 StaticCompiler = "0.7.6"
 StaticTools = "0.9.2"
-JuliaC = "0.3"
-KaosCleaner = "0.7"
+Test = "1"
 VeriJul = "0.1, 0.2"
 julia = "1.10"
 
 [extras]
 AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 DiscretePIDs = "c1363496-6848-4723-8758-079b737f6baf"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 VeriJul = "a90675a2-a9ae-420a-b66a-bece10430f60"
 
 [targets]
-test = ["Test", "AllocCheck", "DiscretePIDs", "Libdl", "VeriJul"]
+test = ["Test", "Aqua", "AllocCheck", "DiscretePIDs", "Libdl", "VeriJul"]

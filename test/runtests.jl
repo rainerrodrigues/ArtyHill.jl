@@ -2,6 +2,7 @@ using Test
 using ArtyHill
 using StaticArrays
 using AllocCheck
+using Aqua
 using Libdl
 using DiscretePIDs
 using VeriJul
@@ -24,6 +25,10 @@ make_plant() = DiscreteLinearPlant([1.0 DT; 0.0 1.0], reshape([0.5DT^2, DT], 2, 
 make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
 
 @testset "ArtyHill" begin
+    @testset "Aqua (package quality)" begin
+        Aqua.test_all(ArtyHill)
+    end
+
     @testset "interface fallbacks" begin
         struct DummyBackend <: AbstractHILBackend end
         @test_throws ArgumentError init_backend!(DummyBackend())
@@ -191,6 +196,40 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
                                                           lock_memory=false, safe_command=[0.0, 0.0])
     end
 
+    @testset "spawn_realtime_loop on a dedicated thread" begin
+        backend = SimulationBackend(make_plant())
+        ws = ControlWorkspace{2,1,2}()
+        init_backend!(backend)
+        tid = Threads.Atomic{Int}(0)
+        ctrl = let inner = make_ctrl()
+            (u, x, y) -> (tid[] = Threads.threadid(); inner(u, x, y))
+        end
+        target = ArtyHill.default_rt_thread()
+        @test Threads.threadpool(target) === :default
+        h = spawn_realtime_loop(ws, ctrl, backend, 1_000_000, typemax(Int64);
+                                priority=0, lock_memory=false, safe_command=[0.0])
+        @test h.thread == target
+        t0 = time()
+        while tid[] == 0 && time() - t0 < 10; sleep(0.01); end
+        sleep(0.2)
+        @test !istaskdone(h)
+        stop_loop!(h)
+        stats = fetch(h)
+        @test stats.abort_reason === :stopped
+        @test stats.iterations > 50
+        @test stats.safe_command_sent
+        @test tid[] == target                       # the controller really ran on that thread
+        @test GC.enable(true)
+
+        h2 = spawn_realtime_loop(ws, make_ctrl(), backend, 1_000_000, 20; priority=0, lock_memory=false)
+        @test fetch(h2).iterations == 20 && fetch(h2).abort_reason === :none
+        @test_throws ArgumentError spawn_realtime_loop(ws, make_ctrl(), backend, 1_000_000, 1;
+                                                       thread=Threads.maxthreadid() + 1)
+        boom = (u, x, y) -> error("boom")
+        h3 = spawn_realtime_loop(ws, boom, backend, 1_000_000, 5; priority=0, lock_memory=false)
+        @test_throws TaskFailedException fetch(h3)
+    end
+
     @testset "latency histogram" begin
         s = LoopStats(; hist_bucket_ns=1_000, hist_buckets=10)
         for v in [500, 1_500, 1_500, 2_500, 50_000]
@@ -258,6 +297,36 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
         setin!(0x0237, Int32(10), Int32(0), Int16(0)); @test cycle!([2.5])[1:2] == (0x0006, 10)
     end
 
+    @testset "EtherCAT CoE / DC helpers (no bus)" begin
+        rx = [PDOEntry(0x6040, 0, 16), PDOEntry(0, 0, 8), PDOEntry(0x60FF, 0, 32), PDOEntry(0x6060, 0, 8)]
+        tx = [PDOEntry(0x6041, 0, 16), PDOEntry(0x2000, 1, 32), PDOEntry(0x6064, 0, 32)]
+        L = CiA402Layout(rx, tx)
+        @test (L.out_stride, L.controlword, L.target, L.mode_of_operation) == (8, 0, 3, 7)
+        @test (L.in_stride, L.statusword, L.position_actual, L.velocity_actual, L.torque_actual) == (10, 0, 6, -1, -1)
+        @test_throws ArgumentError CiA402Layout([PDOEntry(0x607A, 0, 32), PDOEntry(0x60FF, 0, 32)], tx)
+        @test_throws ArgumentError CiA402Layout([PDOEntry(0x6040, 0, 4), PDOEntry(0x607A, 0, 32)], tx)
+        @test ArtyHill._mapping_word(PDOEntry(0x607A, 0, 32)) == 0x607A0020
+
+        @test ArtyHill._dc_wrap(Int64(1_250_000), Int64(1_000_000)) == 250_000
+        @test ArtyHill._dc_wrap(Int64(900_000), Int64(1_000_000)) == -100_000
+        @test ArtyHill._dc_wrap(Int64(-100), Int64(1_000_000)) == -100
+
+        @test sprint(showerror, SDOError(2, 0x6065, 0, 0x06010002)) ==
+              "SDOError: slave 2 object 0x6065:00 — abort 0x06010002 (attempt to write a read-only object)"
+        @test occursin("unknown abort code", sprint(showerror, SDOError(1, 0x1000, 0, 0x12345678)))
+
+        @test_throws ArgumentError EtherCATBackend("eth0"; output_bytes=8, dc_align=true)
+        @test_throws ArgumentError EtherCATBackend("eth0"; output_bytes=8, dc_cycle_ns=-1)
+        b = EtherCATBackend("eth0"; output_bytes=8, dc_cycle_ns=1_000_000)
+        @test b.dc_align && b.dc_frame_phase_ns == 500_000
+        @test cycle_correction_ns(b, Int64(1_000_000)) == 0      # not initialized → no correction
+        @test_throws ArgumentError sdo_read(b, 1, 0x1018, 1, UInt32)
+        @test cycle_correction_ns(SimulationBackend(make_plant()), Int64(1_000_000)) == 0
+
+        ws = ControlWorkspace{2,1,2}()
+        @test alloc_free_except_soem_ffi(check_loop_allocs(ws, make_ctrl(), b))
+    end
+
     @testset "SocketCAN options" begin
         @test sizeof(ArtyHill.CanFDFrame) == 72
         b = SocketCANBackend("vcan0"; tx_base_id=0x100, rx_base_id=0x200, rx_count=3)
@@ -292,6 +361,22 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
         @test 0 < latency_percentile(stats, 0.99) <= stats.max_latency_ns + 1_000
         @test stats.abort_reason === :none
         show(devnull, MIME"text/plain"(), stats)
+    end
+
+    @testset "cycloidal drive example: geometry → simulation → identification" begin
+        mod = Module(:CycloidalExample)
+        Base.include(mod, joinpath(@__DIR__, "..", "examples", "cycloidal_drive.jl"))
+        res = Base.invokelatest(mod.run_example; period_ns=20_000, verbose=false)
+        m = res.model
+        @test res.geo.ratio == 9
+        @test res.b_hat ≈ res.geo.backlash rtol = 0.1           # elastic wind-up adds a little
+        @test res.id.J ≈ res.J_true rtol = 0.02
+        @test res.id.JL ≈ m.JL rtol = 0.02
+        @test res.id.Jm_reflected ≈ m.Jm * m.N^2 rtol = 0.02
+        @test res.id.Fc ≈ m.Fc rtol = 0.1
+        @test length(res.sweep) == 3
+        @test all(s -> isfinite(s.load_pd.rms) && isfinite(s.motor_pd.rms), res.sweep)
+        @test all(s -> s.motor_pd.p2p < 5e-3, res.sweep)       # motor-side loop never hunts here
     end
 
     @testset "DiscretePIDs extension" begin
@@ -338,6 +423,33 @@ make_ctrl() = StaticFeedback([40.0 12.0])       # PD: u = -40 x - 12 v
             for _ in 1:3; control_step!(ws, ctrl, b); end
             @test -327.68 <= ws.y_meas[1] < 327.68
             @test_throws ArgumentError verijul_backend(dut; inputs=[:y], outputs=[:y])
+            @test close_backend!(b) == HIL_OK
+            VeriJul.destroy!(dut)
+        end
+    end
+
+    @testset "VeriJul co-simulation backend (Verilator RTL)" begin
+        has_verilator = !isempty(get(ENV, "VERIJUL_VERILATOR", "")) || Sys.which("verilator") !== nothing
+        if !has_verilator || Sys.which(get(ENV, "CXX", "g++")) === nothing
+            @info "Skipping Verilator RTL test: verilator or a C++ compiler is not installed"
+        else
+            dut = VeriJul.load_dut(joinpath(@__DIR__, "rtl", "accumulator.v"), "accumulator";
+                                   build_dir=mktempdir())
+            b = verijul_backend(dut; inputs=[:u], outputs=[:y], cycles_per_step=2,
+                                input_scale=100.0, output_scale=100.0)
+            ws = ControlWorkspace{1,1,1}()
+            @test init_backend!(b) == HIL_OK
+            cmd = Ref(0.5)
+            ctrl = (u, x, y) -> (u[1] = cmd[]; nothing)
+            control_step!(ws, ctrl, b)                    # y: 0 → 2 clocks × 50 = 100 raw
+            control_step!(ws, ctrl, b); @test ws.y_meas[1] ≈ 1.0
+            cmd[] = -1.5
+            control_step!(ws, ctrl, b)
+            control_step!(ws, ctrl, b); @test ws.y_meas[1] ≈ -1.0   # signed 16-bit readback
+            # Closed loop: a P controller drives the RTL integrator to a setpoint.
+            pctrl = (u, x, y) -> (u[1] = 0.2 * (5.0 - y[1]); nothing)
+            for _ in 1:200; control_step!(ws, pctrl, b); end
+            @test ws.y_meas[1] ≈ 5.0 atol = 0.05
             @test close_backend!(b) == HIL_OK
             VeriJul.destroy!(dut)
         end
