@@ -31,11 +31,9 @@ jobs:
           JULIA_NUM_THREADS: '2'
 
   vcan:
-    # Real SocketCAN I/O on a virtual CAN bus. Kept non-blocking until it has
-    # proven stable on GitHub's runner kernels.
+    # Real SocketCAN I/O on a virtual CAN bus.
     name: SocketCAN (vcan0)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Create vcan0 (CAN FD capable)
