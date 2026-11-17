@@ -32,13 +32,31 @@ inner() {
     ip link add ecat0 type veth peer name ecat1
     ip link set ecat0 up
     ip link set ecat1 up
-    ARTYHILL_ETHERCAT=ecat0 ARTYHILL_ETHERCAT_PEER=ecat1 ARTYHILL_LIBSOEM_DIR="$CACHE" \
+    # The namespace has no route to the internet: resolve the test env offline
+    # from what `prefetch` downloaded.
+    JULIA_PKG_OFFLINE=true ARTYHILL_ETHERCAT=ecat0 ARTYHILL_ETHERCAT_PEER=ecat1 ARTYHILL_LIBSOEM_DIR="$CACHE" \
         "$JULIA" --threads=2 --project="$ROOT" -e 'using Pkg; Pkg.test()'
+}
+
+# Download the package and its test-only dependencies while we still have network.
+prefetch() {
+    ARTYHILL_ROOT="$ROOT" "$JULIA" -e '
+        using Pkg
+        root = ENV["ARTYHILL_ROOT"]
+        proj = Pkg.TOML.parsefile(joinpath(root, "Project.toml"))
+        test_deps = [PackageSpec(name=n, uuid=proj["extras"][n]) for n in proj["targets"]["test"]]
+        Pkg.activate(; temp=true)
+        Pkg.develop(path=root)
+        Pkg.add(test_deps)'
 }
 
 if [[ "${1:-}" == "--inner" ]]; then
     inner
-elif [[ $(id -u) -eq 0 ]]; then
+    exit
+fi
+
+prefetch
+if [[ $(id -u) -eq 0 ]]; then
     exec unshare -n "$0" --inner          # own network namespace, already root
 else
     exec unshare -rn "$0" --inner         # unprivileged user + network namespace
