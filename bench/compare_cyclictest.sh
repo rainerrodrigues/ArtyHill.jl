@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compare ArtyHill's loop jitter with cyclictest (rt-tests) under identical settings.
 #
-#   sudo ./bench/compare_cyclictest.sh [period_us] [iterations] [cpu] [priority]
+#   bench/rtrun.sh ./bench/compare_cyclictest.sh [period_us] [iterations] [cpu] [priority]
 #
 # Needs: rt-tests (`sudo apt install rt-tests`), Julia on PATH (or JULIA=...),
 # root or CAP_SYS_NICE + CAP_IPC_LOCK. For meaningful numbers use a PREEMPT_RT

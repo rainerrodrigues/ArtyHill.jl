@@ -48,7 +48,8 @@ latency_percentile(stats, 0.999; kind=:wake)   # scheduling jitter, ns
 
 `bench/compare_cyclictest.sh` runs `cyclictest` and ArtyHill with identical
 period, priority and CPU, so you can see how much the Julia loop adds on top
-of the kernel's own latency.
+of the kernel's own latency. [Tutorial: PREEMPT_RT latency](@ref) walks through
+setting up a machine and running it.
 
 ## Telemetry
 

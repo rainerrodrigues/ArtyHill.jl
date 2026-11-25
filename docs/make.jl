@@ -14,6 +14,10 @@ makedocs(;
             "Code generation" => "codegen.md",
             "Ecosystem extensions" => "extensions.md",
         ],
+        "Tutorials" => [
+            "Bring up a real servo drive" => "tutorials/drive_bringup.md",
+            "PREEMPT_RT latency" => "tutorials/preempt_rt.md",
+        ],
         "Example: cycloidal drive" => "examples.md",
         "API reference" => "api.md",
     ],

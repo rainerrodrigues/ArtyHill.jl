@@ -77,10 +77,16 @@ unprivileged network namespace:
 test/ethercat/run.sh
 ```
 
+First bring-up of a real CiA 402 drive (asks before enabling and before moving):
+
+```bash
+COUNTS_PER_REV=131072 bench/rtrun.sh julia --threads=2 --project=bench bench/drive_bench.jl eth1
+```
+
 Latency against `cyclictest`, on a PREEMPT_RT machine:
 
 ```bash
-sudo ./bench/compare_cyclictest.sh 1000 100000 3 80
+bench/rtrun.sh ./bench/compare_cyclictest.sh 1000 600000 3 80
 ```
 
 ## Real-time setup checklist
@@ -106,8 +112,10 @@ sudo ./bench/compare_cyclictest.sh 1000 100000 3 80
 - The VeriJul backend runs against real Verilator-compiled RTL in CI, as well as a C stand-in.
 - **Not yet run on physical hardware.** The emulator follows the EtherCAT and CiA 402 specs, but real drives
   add vendor quirks, segmented SDO transfers and stricter DC timing. Use a bench drive with hardware
-  interlocks before connecting anything that moves.
+  interlocks before connecting anything that moves; `bench/drive_bench.jl` walks through a first bring-up.
 - **No PREEMPT_RT numbers yet.** `bench/compare_cyclictest.sh` is ready but has only run on a stock kernel.
 
 See the [documentation](https://rainerrodrigues.github.io/ArtyHill.jl/dev/) for guides on backends, the
-real-time loop, safety, code generation and the cycloidal-drive example.
+real-time loop, safety, code generation and the cycloidal-drive example, and step-by-step tutorials for
+[bringing up a real servo drive](https://rainerrodrigues.github.io/ArtyHill.jl/dev/tutorials/drive_bringup/) and
+[measuring PREEMPT_RT latency](https://rainerrodrigues.github.io/ArtyHill.jl/dev/tutorials/preempt_rt/).
