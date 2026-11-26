@@ -25,6 +25,8 @@ Julia controller sees the same sample-to-actuation timing it will see on hardwar
 
 ## Cleaning telemetry
 
+KaosCleaner is a registered package (Julia ≥ 1.12): `Pkg.add("KaosCleaner")`.
+
 ```julia
 using ArtyHill, KaosCleaner
 df = clean_telemetry("telemetry.csv"; outliers="hampel", resample="1ms")

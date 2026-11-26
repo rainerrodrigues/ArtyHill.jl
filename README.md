@@ -54,7 +54,7 @@ identification from telemetry → controller sweep; see the [walkthrough](docs/s
 | `using JuliaC` (Julia ≥ 1.12) | `juliac_build` |
 | `using DiscretePIDs` | `pid_bank`: DiscretePIDs.jl controllers as one allocation-free controller |
 | `using VeriJul` | `verijul_backend`: a Verilated design as the plant / I/O hardware |
-| `using KaosCleaner` (Julia ≥ 1.12, [install from GitHub](https://github.com/rainerrodrigues/KaosCleaner)) | `clean_telemetry`: Hampel outlier removal and resampling of telemetry logs |
+| `using KaosCleaner` (Julia ≥ 1.12) | `clean_telemetry`: Hampel outlier removal and resampling of telemetry logs |
 
 ## Testing
 

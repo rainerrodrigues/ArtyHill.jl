@@ -81,7 +81,7 @@ Post-process a telemetry CSV written by [`write_telemetry_csv`](@ref) with
 KaosCleaner.jl: outliers in the measurement/command columns (`y*`, `u*`, or
 `columns`) become missing, and with `resample="1ms"` the log is put on a
 regular time grid, ready for system identification. Requires Julia ≥ 1.12 and
-`using KaosCleaner` (install from https://github.com/rainerrodrigues/KaosCleaner).
+`using KaosCleaner` (`Pkg.add("KaosCleaner")`).
 """
 function clean_telemetry end
 

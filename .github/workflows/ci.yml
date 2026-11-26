@@ -37,7 +37,9 @@ jobs:
           files: lcov.info
           flags: julia-${{ matrix.version }}
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          # Fail on main so a missing or broken token cannot go unnoticed again;
+          # on pull requests a Codecov outage should not block the required checks.
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   vcan:
     # Real SocketCAN I/O on a virtual CAN bus.
@@ -68,7 +70,9 @@ jobs:
           files: lcov.info
           flags: socketcan
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          # Fail on main so a missing or broken token cannot go unnoticed again;
+          # on pull requests a Codecov outage should not block the required checks.
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   ethercat:
     # Real SOEM 1.4 master ↔ emulated CiA 402 drives over a veth pair, inside
@@ -99,7 +103,9 @@ jobs:
           files: lcov.info
           flags: ethercat
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          # Fail on main so a missing or broken token cannot go unnoticed again;
+          # on pull requests a Codecov outage should not block the required checks.
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   jet:
     # Static analysis: JET's versions track Julia releases, so it runs on one.
